@@ -1858,3 +1858,31 @@ ORDER BY customer_count DESC, pp1.product_id, pp2.product_id
 GROUP BY pp1.product_id, pp2.product_id
   HAVING COUNT(1) > 2
 ORDER BY customer_count DESC, pp1.product_id, pp2.product_id
+
+
+/* Find Students with Study Spiral Pattern */
+    WITH CTE1 (student_id, subject, gap) AS
+         (SELECT ss1.student_id, ss1.subject,
+                 ss1.session_date - LAG(ss1.session_date, 1, ss1.session_date)
+                                    OVER (PARTITION BY ss1.student_id ORDER BY ss1.session_date)
+            FROM study_sessions ss1
+                 JOIN study_sessions ss2
+                 ON ss1.student_id = ss2.student_id
+                    AND ss1.subject = ss2.subject
+                    AND ss1.session_id != ss2.session_id
+         ),
+         CTE2 (student_id, subject) AS
+         (  SELECT student_id, subject
+              FROM CTE1 c1
+             WHERE NOT EXISTS (SELECT 1 FROM CTE1 c2 WHERE gap > 2 AND c1.student_id = c2.student_id)
+          GROUP BY student_id, subject
+         )
+  SELECT student_id,
+         (SELECT student_name FROM students WHERE CTE2.student_id = students.student_id),
+         (SELECT major FROM students WHERE CTE2.student_id = students.student_id),
+         COUNT(*) cycle_length,
+         (SELECT SUM(hours_studied) FROM study_sessions WHERE CTE2.student_id = study_sessions.student_id) total_study_hours
+    FROM CTE2
+GROUP BY student_id
+  HAVING COUNT(*) > 2
+ORDER BY cycle_length DESC, total_study_hours DESC
