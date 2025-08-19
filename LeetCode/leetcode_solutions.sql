@@ -1886,3 +1886,181 @@ ORDER BY customer_count DESC, pp1.product_id, pp2.product_id
 GROUP BY student_id
   HAVING COUNT(*) > 2
 ORDER BY cycle_length DESC, total_study_hours DESC
+
+
+/* Find Invalid IP Addresses */
+  SELECT ip, COUNT(ip) invalid_count
+    FROM logs
+   WHERE NOT (ip ~ '^\d{1,3}(\.\d{1,3}){3}$'
+              AND split_part(ip, '.', 1)::int BETWEEN 0 AND 255
+              AND split_part(ip, '.', 2)::int BETWEEN 0 AND 255
+              AND split_part(ip, '.', 3)::int BETWEEN 0 AND 255
+              AND split_part(ip, '.', 4)::int BETWEEN 0 AND 255
+              AND split_part(ip, '.', 1) !~ '^0\d+'
+              AND split_part(ip, '.', 2) !~ '^0\d+'
+              AND split_part(ip, '.', 3) !~ '^0\d+'
+              AND split_part(ip, '.', 4) !~ '^0\d+')
+GROUP BY ip
+ORDER BY invalid_count DESC, ip DESC
+
+
+/* Find Stores with Inventory Imbalance */
+    WITH price_statistics AS
+         (SELECT store_id, product_name, quantity, price,
+                 MAX(price) OVER (PARTITION BY store_id) highest_price,
+                 MIN(price) OVER (PARTITION BY store_id) lowest_price,
+                 COUNT(product_name) OVER (PARTITION BY store_id) prod_count
+            FROM inventory
+         ),
+         product_statistics AS
+         (  SELECT store_id,
+                   MAX(CASE WHEN price = highest_price THEN product_name END) most_exp_product,
+                   MAX(CASE WHEN price = lowest_price  THEN product_name END) cheapest_product,
+                   MAX(CASE WHEN price = highest_price THEN quantity END) most_exp_product_quantity,
+                   MAX(CASE WHEN price = lowest_price  THEN quantity END) cheapest_product_quantity
+              FROM price_statistics
+             WHERE prod_count > 2
+                   AND (price = highest_price OR price = lowest_price)
+          GROUP BY store_id
+         )
+  SELECT s.store_id, s.store_name, s.location, ps.most_exp_product, ps.cheapest_product,
+         ROUND(ps.cheapest_product_quantity::numeric / ps.most_exp_product_quantity, 2) imbalance_ratio
+    FROM product_statistics ps
+         JOIN stores s
+         ON ps.most_exp_product_quantity < ps.cheapest_product_quantity
+            AND ps.store_id = s.store_id
+ORDER BY imbalance_ratio DESC, s.store_name ASC
+
+-- Another solution
+    WITH price_statistics AS
+         (SELECT store_id, product_name, quantity, price,
+                 MAX(price) OVER (PARTITION BY store_id) highest_price,
+                 MIN(price) OVER (PARTITION BY store_id) lowest_price,
+                 COUNT(product_name) OVER (PARTITION BY store_id) prod_count
+            FROM inventory i1
+           WHERE EXISTS (  SELECT 1
+                             FROM inventory i2
+                            WHERE i1.store_id = i2.store_id
+                         GROUP BY store_id
+                           HAVING COUNT(product_name) > 2
+                        )
+         ),
+         product_statistics AS
+         (  SELECT store_id,
+                   MAX(CASE WHEN price = highest_price THEN product_name END) most_exp_product,
+                   MAX(CASE WHEN price = lowest_price  THEN product_name END) cheapest_product,
+                   MAX(CASE WHEN price = highest_price THEN quantity END) most_exp_product_quantity,
+                   MAX(CASE WHEN price = lowest_price  THEN quantity END) cheapest_product_quantity
+              FROM price_statistics
+             WHERE price = highest_price OR price = lowest_price
+          GROUP BY store_id
+         )
+  SELECT s.store_id, s.store_name, s.location, ps.most_exp_product, ps.cheapest_product,
+         ROUND(ps.cheapest_product_quantity::numeric / ps.most_exp_product_quantity, 2) imbalance_ratio
+    FROM product_statistics ps
+         JOIN stores s
+              ON ps.most_exp_product_quantity < ps.cheapest_product_quantity
+                  AND ps.store_id = s.store_id
+ORDER BY imbalance_ratio DESC, s.store_name ASC
+
+
+/* Find Books with Polarized Opinions */
+    WITH book_reading_session (book_id, total_sessions) AS
+         (  SELECT book_id, COUNT(1)
+              FROM reading_sessions
+          GROUP BY book_id
+            HAVING COUNT(1) > 4
+         ),
+         polarized_book (book_id, session_rating, total_sessions) AS
+         (SELECT rs.book_id, rs.session_rating, brs.total_sessions
+            FROM reading_sessions rs
+                 JOIN book_reading_session brs
+                 ON rs.book_id = brs.book_id
+           WHERE brs.book_id IN (   SELECT book_id
+                                      FROM reading_sessions
+                                     WHERE session_rating >= 4
+                                 INTERSECT
+                                    SELECT book_id
+                                      FROM reading_sessions
+                                     WHERE session_rating <= 2
+                                )
+         ),
+         polarization_statistics (book_id, rating_spread, polarization_score) AS
+         (  SELECT book_id,
+                   MAX(session_rating) - MIN(session_rating),
+                   ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+                         / total_sessions::numeric, 2)
+              FROM polarized_book
+          GROUP BY book_id, total_sessions
+            HAVING ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+                         / total_sessions::numeric, 2) >= 0.6
+         )
+  SELECT b.book_id, title, author, genre, pages,
+         rating_spread, polarization_score
+    FROM books b
+         JOIN polarization_statistics ps
+         ON b.book_id = ps.book_id
+ORDER BY polarization_score DESC, title DESC
+
+-- Another solution
+    WITH polarized_book (book_id) AS
+         (   SELECT book_id
+               FROM reading_sessions
+           GROUP BY book_id
+             HAVING COUNT(1) > 4
+          INTERSECT
+             SELECT book_id
+               FROM reading_sessions
+              WHERE session_rating >= 4
+          INTERSECT
+             SELECT book_id
+               FROM reading_sessions
+              WHERE session_rating <= 2
+         ),
+         polarization_statistics (book_id, rating_spread, polarization_score) AS
+         (  SELECT rs.book_id,
+                   MAX(session_rating) - MIN(session_rating),
+                   ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+                         / COUNT(1)::numeric, 2)
+              FROM reading_sessions rs
+                   JOIN polarized_book pb
+                   ON rs.book_id = pb.book_id
+          GROUP BY rs.book_id
+            HAVING ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+                         / COUNT(1)::numeric, 2) >= 0.6
+         )
+  SELECT b.book_id, title, author, genre, pages,
+         rating_spread, polarization_score
+    FROM books b
+         JOIN polarization_statistics ps
+         ON b.book_id = ps.book_id
+ORDER BY polarization_score DESC, title DESC
+
+-- Another solution
+   WITH polarized_book (book_id) AS
+        (    SELECT book_id
+               FROM reading_sessions
+           GROUP BY book_id
+             HAVING COUNT(1) > 4
+          INTERSECT
+             SELECT book_id
+               FROM reading_sessions
+              WHERE session_rating >= 4
+          INTERSECT
+             SELECT book_id
+               FROM reading_sessions
+              WHERE session_rating <= 2
+         )
+  SELECT b.book_id, title, author, genre, pages,
+         MAX(session_rating) - MIN(session_rating) rating_spread,
+         ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+               / COUNT(1)::numeric, 2) polarization_score
+    FROM reading_sessions rs
+         JOIN polarized_book pb
+         ON rs.book_id = pb.book_id
+         JOIN books b
+         ON pb.book_id = b.book_id
+GROUP BY b.book_id, title, author, genre, pages
+  HAVING ROUND(COUNT(CASE WHEN session_rating >= 4 OR session_rating <=2 THEN 1 END)
+               / COUNT(1)::numeric, 2) >= 0.6
+ORDER BY polarization_score DESC, title DESC
